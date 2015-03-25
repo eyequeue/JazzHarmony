@@ -1,19 +1,18 @@
-import midi
-import music21
-from imghdr import what
-import os
-import numpy
-from string import Template
+from music21 import *
+from sets import *
 import csv
+import pickle
+import numpy
+import os
 import operator
-import scipy.stats
+from string import Template
+import numpy
 import collections
 
-
-path = 'C:/Users/Andrew/Documents/DissNOTCORRUPT/MIDIunquant/'
-listing = os.listdir(path)
-#testFile = 'C:/Users/Andrew/Documents/DissNOTCORRUPT/MIDIQuantized/Alex_1_1.mid'
-#testFile = 'C:/Users/Andrew/Documents/DissNOTCORRUPT/MIDIQuantized/Julian_5_6.mid'
+"""
+Primarily in-process modifications of existing, functional code
+Do them here so I don't fuck up the ones that work
+"""
 
 def getProbsFromFreqs(DictionaryOfTallies):
     totalSum = 0.0
@@ -23,6 +22,46 @@ def getProbsFromFreqs(DictionaryOfTallies):
     for key, freq in DictionaryOfTallies.iteritems():
         dictOfProbs[key] = float(freq)/totalSum
     return dictOfProbs
+        
+def pickleExplorer():
+    theSlices = pickle.load( open ('1122MajModeSliceDictwSDB.pkl', 'rb') )
+    sliceTally = {}
+    for i, slicey in enumerate(theSlices):
+        if slicey == ['start'] or slicey == ['end']:
+            continue
+        theKey = slicey['key']
+        theTonic = str(theKey).split(' ')[0]
+        theMode = str(theKey).split(' ')[1]
+        theKeyPC = pitch.Pitch(theTonic).pitchClass
+        keyTransPCs = [(n - theKeyPC)%12 for n in slicey['pcset']]
+        rightChord = chord.Chord(sorted(keyTransPCs))
+        rightLabel = rightChord.pitchNames
+        try:
+            sliceTally[str((rightLabel, slicey['bassSD']))] += 1
+        except KeyError:
+            sliceTally[str((rightLabel, slicey['bassSD']))] = 1
+    sorted_sliceTally = sorted(sliceTally.iteritems(), key=operator.itemgetter(1), reverse=True)
+    xmaj = csv.writer(open('MajModeSliceTally.csv', 'wb'))
+    for pair in sorted_sliceTally:
+        xmaj.writerow([pair[0],pair[1]])
+        
+ 
+ 
+import midi
+import music21
+from imghdr import what
+import os
+import numpy
+from string import Template
+import csv
+import operator
+import scipy.stats
+
+
+path = 'C:/Users/Andrew/Documents/DissNOTCORRUPT/MIDIunquant/'
+listing = os.listdir(path)
+#testFile = 'C:/Users/Andrew/Documents/DissNOTCORRUPT/MIDIQuantized/Alex_1_1.mid'
+#testFile = 'C:/Users/Andrew/Documents/DissNOTCORRUPT/MIDIQuantized/Julian_5_6.mid'
 
 """
 OK, things to do:
@@ -32,8 +71,16 @@ OK, things to do:
 4. Translate those absolute ticks into elapsed milli/microseconds (DONE)
 5. Figure out the distribution of note lengths; choose a good one for windowing (SKIPPED)
 6. Make a list of time slices in which we can look for notes (DONE)
-7. Export time slices as a csv.  Mimic ycac?
+7. Export time slices as a csv.  Mimic ycac? (DONE)
+8. Now, go back and figure out how to make the windows overlapping. (DONE)
 """
+
+'''
+TO CHANGE
+For each window, whenever a pitch appears, weight it by its duration in the count
+So look for the noteOff after a given noteOn, and subtract their absTicks
+Counts need integers, so try #pitches x int(round(millisecs)), maybe?
+'''
 def midiTimeWindows(windowWidth,incUnit,solos=all):
     #windowWidth is obvious; incUnit how large the window slide step is
     #numTunes = 0
@@ -47,7 +94,7 @@ def midiTimeWindows(windowWidth,incUnit,solos=all):
         if solos != all:
             if testFile != solos:
                 continue
-        #print path + testFile
+        print path + testFile
         #if n > 50:
             #continue
             #break
@@ -96,33 +143,35 @@ def midiTimeWindows(windowWidth,incUnit,solos=all):
                     #break
                 absTicks = thing.tick * microspt/1000
                 if thing.__class__ == midi.events.NoteOnEvent and thing.get_velocity() != 0:
+                    #figure out how long it is by looking for off event
+                    for s in range(m,len(track)):
+                        if track[s].__class__ == midi.events.NoteOnEvent and track[s].get_velocity() == 0 and track[s].get_pitch() == thing.get_pitch():
+                            endTick = track[s].tick* microspt/1000
+                            diffTicks = endTick - absTicks
+                            break
+                        if track[s].__class__ == midi.events.NoteOffEvent and track[s].get_pitch() == thing.get_pitch():
+                            endTick = track[s].tick* microspt/1000
+                            diffTicks = endTick - absTicks
+                            break
+                        if s == len(track):
+                            print 'No note end!',testFile
                     for j in range(len(windows)):
-                        #deal with note on events case
-                        #put it in each window
+                        #weight considering four cases.  First, if the note off starts and ends inside the first window
                         if j*incUnit < absTicks < j*incUnit + windowWidth:
-                            windows[j][thing.get_pitch()] += 1
+                            if endTick < j*incUnit + windowWidth:
+                                windows[j][thing.get_pitch()] += int(round(diffTicks))
+                            #next, if it starts in one and stretches to some future window
+                            if endTick > j*incUnit + windowWidth:
+                                windows[j][thing.get_pitch()] += int(round(j*incUnit + windowWidth - absTicks))
                         if j*incUnit > absTicks:
-                            #first too-late window
-                            for k in range(j,len(windows)):
-                                #Add to all remaining; we'll turn it off later
-                                windows[k][thing.get_pitch()] += 1
-                            break
-                #deal with note off events cases
-                elif thing.__class__ == midi.events.NoteOnEvent and thing.get_velocity() == 0:
-                    for j in range(len(windows)):
-                        if j*incUnit > absTicks:
-                            #first window AFTER
-                            for k in range(j,len(windows)):
-                                #turn off in all windows after so it's not counted
-                                del windows[k][thing.get_pitch()]
-                            break
-                elif thing.__class__ == midi.events.NoteOffEvent:
-                    for j in range(len(windows)):
-                        if j*incUnit > absTicks:
-                            #first window AFTER
-                            for k in range(j,len(windows)):
-                                #turn off in all windows after so it's not counted
-                                del windows[k][thing.get_pitch()]
+                            #if it started in some past window and ends in some future one
+                            if endTick > j*incUnit + windowWidth:
+                                windows[j][thing.get_pitch()] += windowWidth
+                            #and last: if it started in some past window and ends in this one
+                            if j*incUnit < endTick < j*incUnit + windowWidth:
+                                windows[j][thing.get_pitch()] += int(round(endTick - j*incUnit))
+                        #Once the note has ended, stop looking for places to stick it
+                        if j*incUnit > endTick:
                             break
             for j in range(len(windows)):
                 if sum(windows[j].values()) == 0:#skip the empty windows
@@ -142,7 +191,7 @@ def midiTimeWindows(windowWidth,incUnit,solos=all):
     #print msandmidi
     '''
     #package up a csv
-    fieldnames = ['ms window end','MIDI multiset','ordered PCs','file']
+    fieldnames = ['ms window end','weighted MIDI','ordered PCs','file']
     fileName = Template('$siz $inc ms inc 1122.csv')
     csvName = fileName.substitute(siz = str(windowWidth), inc = str(incUnit))
     file = open(csvName, 'wb')
@@ -177,9 +226,10 @@ def entrop(solo=all):
                 continue
             pcVector = []
             for j in range(12):
-                pcVector.append(0.01)
+                pcVector.append(0.1)
             for mid, counts in row[1].iteritems():
                 pcVector[mid%12] += counts
+            #print pcVector, scipy.exp2(scipy.stats.entropy(pcVector,base=2))
             entropies.append(scipy.exp2(scipy.stats.entropy(pcVector,base=2)))
             #print windowSize,pcVector, entropies[-1]
         EntropyatSize.append([windowSize,scipy.average(entropies)])
@@ -215,7 +265,7 @@ def slidingEntropy(solo,windowSize, incUnit):
     lw = csv.writer(file)
     for row in entropies:
         lw.writerow(row)
-              
-#entrop(solo='Alex_6_6_blueingreen.mid')
-slidingEntropy('Alex_6_6_blueingreen.mid', 1000, 25)
-#midiTimeWindows(200, 25)
+           
+#midiTimeWindows(2000, 25, solos='Alex_6_6_blueingreen.mid')
+entrop()
+#slidingEntropy('Alex_6_6_blueingreen.mid', 1000, 25)
